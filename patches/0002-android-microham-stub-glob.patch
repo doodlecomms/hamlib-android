@@ -1,0 +1,45 @@
+diff --git a/src/microham.c b/src/microham.c
+index b18c2576..693d19cd 100644
+--- a/src/microham.c
++++ b/src/microham.c
+@@ -272,7 +272,31 @@ static struct uhtypes
+ //
+ #include <termios.h>
+ #include <sys/stat.h>
++#ifdef __ANDROID__
++typedef struct {
++    size_t gl_pathc;
++    char **gl_pathv;
++} glob_t;
++
++static int glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *p)
++{
++    (void)pattern;
++    (void)flags;
++    (void)errfunc;
++    if (p) {
++        p->gl_pathc = 0;
++        p->gl_pathv = NULL;
++    }
++    return 0;
++}
++
++static void globfree(glob_t *p)
++{
++    (void)p;
++}
++#else
+ #include <glob.h>
++#endif
+ static void finddevices()
+ {
+     struct stat st;
+@@ -372,6 +396,8 @@ static void finddevices()
+                 }
+             }
+         }
++
++        globfree(&gbuf);
+     }
+ }
+ 

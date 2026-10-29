@@ -1,0 +1,702 @@
+diff --git a/include/Makefile.am b/include/Makefile.am
+index 716a5186..43e20c14 100644
+--- a/include/Makefile.am
++++ b/include/Makefile.am
+@@ -4,4 +4,5 @@ nobase_include_HEADERS = hamlib/rig.h hamlib/riglist.h hamlib/rig_dll.h \
+ 		hamlib/rotator.h hamlib/rotlist.h hamlib/rigclass.h \
+ 		hamlib/rotclass.h hamlib/amplifier.h hamlib/amplist.h \
+ 		hamlib/ampclass.h hamlib/multicast.h hamlib/port.h \
+-		hamlib/amp_state.h hamlib/rig_state.h hamlib/rot_state.h
++		hamlib/amp_state.h hamlib/rig_state.h hamlib/rot_state.h \
++		hamlib/rpt_usb_serial.h
+diff --git a/include/hamlib/rpt_usb_serial.h b/include/hamlib/rpt_usb_serial.h
+new file mode 100644
+index 00000000..36758b77
+--- /dev/null
++++ b/include/hamlib/rpt_usb_serial.h
+@@ -0,0 +1,75 @@
++/*
++ *  Hamlib Interface - Android USB serial bridge, host callback table
++ *
++ *  The serial port hook for "android-usb:<deviceId>:<portIndex>" paths is
++ *  based on the Android USB serial bridge from JS8Android, used under the
++ *  LGPL with its author's permission.
++ *
++ *   This library is free software; you can redistribute it and/or
++ *   modify it under the terms of the GNU Lesser General Public
++ *   License as published by the Free Software Foundation; either
++ *   version 2.1 of the License, or (at your option) any later version.
++ *
++ *   This library is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *   Lesser General Public License for more details.
++ *
++ *   You should have received a copy of the GNU Lesser General Public
++ *   License along with this library; if not, write to the Free Software
++ *   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ *
++ */
++
++#ifndef _RPT_USB_SERIAL_H
++#define _RPT_USB_SERIAL_H 1
++
++#include <hamlib/rig_dll.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * Android has no /dev/ttyUSB* for an app to open, so the host app owns the
++ * USB device (through the Java USB host API) and lends Hamlib a byte pipe.
++ * When Hamlib opens a serial path of the form "android-usb:<id>:<port>",
++ * it calls back into the host through the table registered below.
++ *
++ * Return value contract, for every callback:
++ *   >= 0  success (read/write: number of bytes moved; read 0 = timed out)
++ *    < 0  failure; RPT_USB_SERIAL_EGONE means the device was detached and
++ *         the connection cannot recover.
++ * is_ready is the one exception: it returns 1 (ready) or 0 (not ready).
++ *
++ * parity uses Hamlib's enum serial_parity_e values (0 none, 1 odd, 2 even,
++ * 3 mark, 4 space); stop_bits is 1 or 2.
++ */
++#define RPT_USB_SERIAL_EGONE (-2)
++
++typedef struct rpt_usb_serial_ops
++{
++    int (*is_ready)(void);
++    int (*open)(int device_id, int port_index, int baud_rate, int data_bits,
++                int stop_bits, int parity);
++    int (*read)(unsigned char *buffer, int length, int timeout_ms);
++    int (*write)(const unsigned char *buffer, int length, int timeout_ms);
++    int (*set_rts)(int state);
++    int (*set_dtr)(int state);
++    int (*flush)(void);
++    int (*close)(void);
++} rpt_usb_serial_ops_t;
++
++/*
++ * Register (ops != NULL) or clear (ops == NULL) the host callbacks. The
++ * table is copied. Returns RIG_OK, -RIG_EINVAL if a callback is missing, or
++ * -RIG_BUSBUSY while a connection is open. Only one android-usb connection
++ * can be open at a time.
++ */
++extern HAMLIB_EXPORT(int) rpt_usb_serial_register(const rpt_usb_serial_ops_t *ops);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _RPT_USB_SERIAL_H */
+diff --git a/src/Makefile.am b/src/Makefile.am
+index fa32dae1..49f5f066 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -4,7 +4,7 @@ BUILT_SOURCES = hamlibdatetime.h
+ 
+ DISTCLEANFILES = hamlibdatetime.h
+ 
+-RIGSRC = hamlibdatetime.h rig.c serial.c serial.h misc.c misc.h register.c register.h event.c \
++RIGSRC = hamlibdatetime.h rig.c serial.c serial.h android_serial_bridge.c android_serial_bridge.h misc.c misc.h register.c register.h event.c \
+ 	event.h cal.c cal.h conf.c tones.c tones.h rotator.c locator.c rot_reg.c \
+ 	rot_conf.c rot_conf.h rot_settings.c rot_ext.c iofunc.c iofunc.h ext.c \
+    	mem.c settings.c parallel.c parallel.h usb_port.c usb_port.h debug.c \
+diff --git a/src/android_serial_bridge.c b/src/android_serial_bridge.c
+new file mode 100644
+index 00000000..548fa9d5
+--- /dev/null
++++ b/src/android_serial_bridge.c
+@@ -0,0 +1,446 @@
++/*
++ *  Hamlib Interface - Android USB serial bridge
++ *
++ *  Based on the Android USB serial bridge from JS8Android, used under the
++ *  LGPL with its author's permission. Reworked to take the host callbacks
++ *  through a registered table (so libhamlib can be a shared library with no
++ *  undefined symbols), to drop the Bluetooth transport, and to make open and
++ *  close safe against concurrent callers and a device being unplugged.
++ *
++ *   This library is free software; you can redistribute it and/or
++ *   modify it under the terms of the GNU Lesser General Public
++ *   License as published by the Free Software Foundation; either
++ *   version 2.1 of the License, or (at your option) any later version.
++ *
++ *   This library is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *   Lesser General Public License for more details.
++ *
++ *   You should have received a copy of the GNU Lesser General Public
++ *   License along with this library; if not, write to the Free Software
++ *   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ *
++ */
++
++#include <hamlib/config.h>
++
++#include "hamlib/rig.h"
++#include "hamlib/rpt_usb_serial.h"
++
++#ifndef __ANDROID__
++
++int HAMLIB_API rpt_usb_serial_register(const rpt_usb_serial_ops_t *ops)
++{
++    (void)ops;
++    return -RIG_ENIMPL;
++}
++
++#else /* __ANDROID__ */
++
++#include <errno.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "android_serial_bridge.h"
++
++#define USB_PREFIX "android-usb:"
++#define USB_PREFIX_LEN 12
++#define POLL_TIMEOUT_MS 100
++#define WRITE_TIMEOUT_MS 1000
++/* Consecutive read errors (about 2 s) before the device counts as gone. */
++#define MAX_READ_ERRORS 100
++
++/*
++ * One connection at a time. Hamlib reads and writes port->fd, which is one
++ * end of a socketpair; two threads move bytes between the other end and the
++ * host callbacks.
++ */
++typedef struct
++{
++    rpt_usb_serial_ops_t ops;
++    int fd_peer;
++    atomic_int running;
++    pthread_t rx_thread;
++    pthread_t tx_thread;
++    int rx_started;
++    int tx_started;
++} bridge_ctx_t;
++
++static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
++static rpt_usb_serial_ops_t g_ops;
++static int g_ops_set;
++static bridge_ctx_t *g_active;
++
++int HAMLIB_API rpt_usb_serial_register(const rpt_usb_serial_ops_t *ops)
++{
++    int ret = RIG_OK;
++
++    if (ops && (!ops->is_ready || !ops->open || !ops->read || !ops->write
++                || !ops->set_rts || !ops->set_dtr || !ops->flush || !ops->close))
++    {
++        return -RIG_EINVAL;
++    }
++
++    pthread_mutex_lock(&g_lock);
++
++    if (g_active)
++    {
++        ret = -RIG_BUSBUSY;
++    }
++    else if (ops)
++    {
++        g_ops = *ops;
++        g_ops_set = 1;
++    }
++    else
++    {
++        memset(&g_ops, 0, sizeof(g_ops));
++        g_ops_set = 0;
++    }
++
++    pthread_mutex_unlock(&g_lock);
++    return ret;
++}
++
++int android_serial_is_path(const char *pathname)
++{
++    return pathname && strncmp(pathname, USB_PREFIX, USB_PREFIX_LEN) == 0;
++}
++
++/* "android-usb:<deviceId>:<portIndex>", portIndex optional (default 0). */
++static int parse_path(const char *pathname, int *device_id, int *port_index)
++{
++    const char *cursor = pathname + USB_PREFIX_LEN;
++    char *end = NULL;
++    long value;
++
++    errno = 0;
++    value = strtol(cursor, &end, 10);
++
++    if (errno || end == cursor || value < 0)
++    {
++        return -1;
++    }
++
++    *device_id = (int)value;
++    *port_index = 0;
++
++    if (*end == '\0')
++    {
++        return 0;
++    }
++
++    if (*end != ':')
++    {
++        return -1;
++    }
++
++    cursor = end + 1;
++    value = strtol(cursor, &end, 10);
++
++    if (errno || end == cursor || *end != '\0' || value < 0)
++    {
++        return -1;
++    }
++
++    *port_index = (int)value;
++    return 0;
++}
++
++/* Waking Hamlib with EOF on its fd is how a lost device shows up as an error. */
++static void stop_pipe(bridge_ctx_t *ctx)
++{
++    atomic_store(&ctx->running, 0);
++    shutdown(ctx->fd_peer, SHUT_RDWR);
++}
++
++/* USB -> Hamlib */
++static void *rx_thread_fn(void *arg)
++{
++    bridge_ctx_t *ctx = (bridge_ctx_t *)arg;
++    unsigned char buffer[512];
++    int error_streak = 0;
++
++    while (atomic_load(&ctx->running))
++    {
++        int n = ctx->ops.read(buffer, sizeof(buffer), POLL_TIMEOUT_MS);
++
++        if (n > 0)
++        {
++            int sent = 0;
++            error_streak = 0;
++
++            while (sent < n && atomic_load(&ctx->running))
++            {
++                /* MSG_NOSIGNAL: a closed peer must not raise SIGPIPE. */
++                ssize_t r = send(ctx->fd_peer, buffer + sent, n - sent, MSG_NOSIGNAL);
++
++                if (r > 0) { sent += (int)r; }
++                else if (r < 0 && errno == EINTR) { continue; }
++                else { break; }
++            }
++        }
++        else if (n == 0)
++        {
++            error_streak = 0;
++        }
++        else if (n == RPT_USB_SERIAL_EGONE || ++error_streak >= MAX_READ_ERRORS)
++        {
++            rig_debug(RIG_DEBUG_ERR, "%s: USB serial device lost (%d)\n",
++                      __func__, n);
++            stop_pipe(ctx);
++            break;
++        }
++        else
++        {
++            if (error_streak == 1)
++            {
++                rig_debug(RIG_DEBUG_WARN, "%s: USB read failed (%d)\n", __func__, n);
++            }
++
++            usleep(20000);
++        }
++    }
++
++    return NULL;
++}
++
++/* Hamlib -> USB */
++static void *tx_thread_fn(void *arg)
++{
++    bridge_ctx_t *ctx = (bridge_ctx_t *)arg;
++    unsigned char buffer[512];
++
++    while (atomic_load(&ctx->running))
++    {
++        ssize_t n = recv(ctx->fd_peer, buffer, sizeof(buffer), 0);
++
++        if (n > 0)
++        {
++            int done = 0;
++
++            while (done < n && atomic_load(&ctx->running))
++            {
++                int w = ctx->ops.write(buffer + done, (int)n - done, WRITE_TIMEOUT_MS);
++
++                if (w > 0) { done += w; continue; }
++
++                rig_debug(RIG_DEBUG_ERR, "%s: USB write failed (%d)\n", __func__, w);
++
++                if (w == RPT_USB_SERIAL_EGONE) { stop_pipe(ctx); }
++
++                break;
++            }
++        }
++        else if (n < 0 && errno == EINTR)
++        {
++            continue;
++        }
++        else
++        {
++            break; /* 0 = shut down by close or by the RX thread */
++        }
++    }
++
++    return NULL;
++}
++
++int android_serial_open(hamlib_port_t *port)
++{
++    bridge_ctx_t *ctx;
++    int device_id;
++    int port_index;
++    int fds[2] = { -1, -1 };
++    int ret;
++
++    if (!port) { return -RIG_EINVAL; }
++
++    if (parse_path(port->pathname, &device_id, &port_index) != 0)
++    {
++        rig_debug(RIG_DEBUG_ERR, "%s: bad path '%s', expected "
++                  USB_PREFIX "<deviceId>:<portIndex>\n", __func__, port->pathname);
++        return -RIG_EINVAL;
++    }
++
++    pthread_mutex_lock(&g_lock);
++
++    if (!g_ops_set || !g_ops.is_ready())
++    {
++        pthread_mutex_unlock(&g_lock);
++        rig_debug(RIG_DEBUG_ERR, "%s: host USB serial layer not ready\n", __func__);
++        return -RIG_EIO;
++    }
++
++    if (g_active)
++    {
++        pthread_mutex_unlock(&g_lock);
++        rig_debug(RIG_DEBUG_ERR, "%s: a USB serial connection is already open\n",
++                  __func__);
++        return -RIG_BUSBUSY;
++    }
++
++    ctx = calloc(1, sizeof(*ctx));
++
++    if (!ctx)
++    {
++        pthread_mutex_unlock(&g_lock);
++        return -RIG_ENOMEM;
++    }
++
++    ctx->ops = g_ops;
++    ctx->fd_peer = -1;
++
++    ret = ctx->ops.open(device_id, port_index, port->parm.serial.rate,
++                        port->parm.serial.data_bits, port->parm.serial.stop_bits,
++                        (int)port->parm.serial.parity);
++
++    if (ret < 0)
++    {
++        rig_debug(RIG_DEBUG_ERR, "%s: host open of device %d port %d failed (%d)\n",
++                  __func__, device_id, port_index, ret);
++        free(ctx);
++        pthread_mutex_unlock(&g_lock);
++        return -RIG_EIO;
++    }
++
++    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
++    {
++        rig_debug(RIG_DEBUG_ERR, "%s: socketpair: %s\n", __func__, strerror(errno));
++        ctx->ops.close();
++        free(ctx);
++        pthread_mutex_unlock(&g_lock);
++        return -RIG_EIO;
++    }
++
++    ctx->fd_peer = fds[1];
++    atomic_store(&ctx->running, 1);
++
++    if (pthread_create(&ctx->rx_thread, NULL, rx_thread_fn, ctx) == 0)
++    {
++        ctx->rx_started = 1;
++    }
++
++    if (ctx->rx_started && pthread_create(&ctx->tx_thread, NULL, tx_thread_fn, ctx) == 0)
++    {
++        ctx->tx_started = 1;
++    }
++
++    if (!ctx->tx_started)
++    {
++        rig_debug(RIG_DEBUG_ERR, "%s: could not start bridge threads\n", __func__);
++        stop_pipe(ctx);
++
++        if (ctx->rx_started) { pthread_join(ctx->rx_thread, NULL); }
++
++        ctx->ops.close();
++        close(fds[0]);
++        close(fds[1]);
++        free(ctx);
++        pthread_mutex_unlock(&g_lock);
++        return -RIG_EIO;
++    }
++
++    g_active = ctx;
++    port->handle = ctx;
++    port->fd = fds[0];
++    pthread_mutex_unlock(&g_lock);
++
++    rig_debug(RIG_DEBUG_VERBOSE, "%s: opened device %d port %d at %d baud\n",
++              __func__, device_id, port_index, port->parm.serial.rate);
++    return RIG_OK;
++}
++
++int android_serial_close(hamlib_port_t *port)
++{
++    bridge_ctx_t *ctx;
++
++    if (!port) { return -RIG_EINVAL; }
++
++    pthread_mutex_lock(&g_lock);
++    ctx = (bridge_ctx_t *)port->handle;
++
++    if (!ctx || ctx != g_active)
++    {
++        pthread_mutex_unlock(&g_lock);
++        return RIG_OK;
++    }
++
++    /* Stop the pipe first so no callback runs after the host closes. */
++    stop_pipe(ctx);
++    pthread_join(ctx->tx_thread, NULL);
++    pthread_join(ctx->rx_thread, NULL);
++    ctx->ops.close();
++
++    close(ctx->fd_peer);
++
++    if (port->fd >= 0) { close(port->fd); }
++
++    port->fd = -1;
++    port->handle = NULL;
++    g_active = NULL;
++    free(ctx);
++    pthread_mutex_unlock(&g_lock);
++    return RIG_OK;
++}
++
++int android_serial_flush(hamlib_port_t *port)
++{
++    bridge_ctx_t *ctx;
++    unsigned char buffer[256];
++
++    if (!port) { return -RIG_EINVAL; }
++
++    /* Discard anything already handed to Hamlib but not yet read. */
++    if (port->fd >= 0)
++    {
++        while (recv(port->fd, buffer, sizeof(buffer), MSG_DONTWAIT) > 0) { }
++    }
++
++    pthread_mutex_lock(&g_lock);
++    ctx = (bridge_ctx_t *)port->handle;
++
++    if (ctx && ctx == g_active)
++    {
++        (void)ctx->ops.flush();
++    }
++
++    pthread_mutex_unlock(&g_lock);
++    return RIG_OK;
++}
++
++static int set_line(hamlib_port_t *port, int state, int is_rts)
++{
++    bridge_ctx_t *ctx;
++    int ret = -RIG_EIO;
++
++    if (!port) { return -RIG_EINVAL; }
++
++    pthread_mutex_lock(&g_lock);
++    ctx = (bridge_ctx_t *)port->handle;
++
++    if (ctx && ctx == g_active)
++    {
++        int r = is_rts ? ctx->ops.set_rts(state) : ctx->ops.set_dtr(state);
++        ret = r < 0 ? -RIG_EIO : RIG_OK;
++    }
++
++    pthread_mutex_unlock(&g_lock);
++    return ret;
++}
++
++int android_serial_set_rts(hamlib_port_t *port, int state)
++{
++    return set_line(port, state, 1);
++}
++
++int android_serial_set_dtr(hamlib_port_t *port, int state)
++{
++    return set_line(port, state, 0);
++}
++
++#endif /* __ANDROID__ */
+diff --git a/src/android_serial_bridge.h b/src/android_serial_bridge.h
+new file mode 100644
+index 00000000..d750c423
+--- /dev/null
++++ b/src/android_serial_bridge.h
+@@ -0,0 +1,38 @@
++/*
++ *  Hamlib Interface - Android USB serial bridge (internal hooks)
++ *
++ *   This library is free software; you can redistribute it and/or
++ *   modify it under the terms of the GNU Lesser General Public
++ *   License as published by the Free Software Foundation; either
++ *   version 2.1 of the License, or (at your option) any later version.
++ *
++ *   This library is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *   Lesser General Public License for more details.
++ *
++ *   You should have received a copy of the GNU Lesser General Public
++ *   License along with this library; if not, write to the Free Software
++ *   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ *
++ */
++
++#ifndef _ANDROID_SERIAL_BRIDGE_H
++#define _ANDROID_SERIAL_BRIDGE_H 1
++
++#ifdef __ANDROID__
++
++#include "hamlib/rig.h"
++#include "hamlib/port.h"
++
++/* Called from serial.c in place of the termios code for android-usb: paths. */
++int android_serial_is_path(const char *pathname);
++int android_serial_open(hamlib_port_t *port);
++int android_serial_close(hamlib_port_t *port);
++int android_serial_flush(hamlib_port_t *port);
++int android_serial_set_rts(hamlib_port_t *port, int state);
++int android_serial_set_dtr(hamlib_port_t *port, int state);
++
++#endif /* __ANDROID__ */
++
++#endif /* _ANDROID_SERIAL_BRIDGE_H */
+diff --git a/src/misc.c b/src/misc.c
+index aaf809a9..7d4f61df 100644
+--- a/src/misc.c
++++ b/src/misc.c
+@@ -2311,6 +2311,11 @@ int HAMLIB_API parse_hoststr(char *hoststr, int hoststr_len, char host[256],
+     // Handle device names 1st
+     if (strstr(hoststr, "/dev")) { return -RIG_EINVAL; }
+ 
++    if (strncasecmp(hoststr, "android-usb:", 12) == 0 ||
++        strncasecmp(hoststr, "android-bt:", 11) == 0) {
++        return -RIG_EINVAL;
++    }
++
+     if (strstr(hoststr, "/")) { return -RIG_EINVAL; } // probably a path so not a hoststr
+ 
+     if (strncasecmp(hoststr, "com", 3) == 0) { return -RIG_EINVAL; }
+diff --git a/src/serial.c b/src/serial.c
+index 71d3c68c..70168ef4 100644
+--- a/src/serial.c
++++ b/src/serial.c
+@@ -73,6 +73,10 @@
+ //! @endcond
+ 
+ #include "serial.h"
++
++#ifdef __ANDROID__
++#include "android_serial_bridge.h"
++#endif
+ #include "misc.h"
+ 
+ #ifdef HAVE_SYS_IOCCOM_H
+@@ -223,6 +227,13 @@ int HAMLIB_API serial_open(hamlib_port_t *rp)
+         return (-RIG_EINVAL);
+     }
+ 
++#ifdef __ANDROID__
++    if (android_serial_is_path(rp->pathname))
++    {
++        return android_serial_open(rp);
++    }
++#endif
++
+ #if defined(WIN32)
+     int retcode = check_com_port_in_use(rp->pathname);
+ 
+@@ -839,6 +850,13 @@ int HAMLIB_API serial_flush(hamlib_port_t *p)
+ 
+ #endif
+ 
++#ifdef __ANDROID__
++    if (android_serial_is_path(p->pathname))
++    {
++        return android_serial_flush(p);
++    }
++#endif
++
+     if (p->fd == uh_ptt_fd || p->fd == uh_radio_fd || p->flushx)
+     {
+         /*
+@@ -991,6 +1009,13 @@ int ser_close(hamlib_port_t *p)
+ 
+     //rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+ 
++#ifdef __ANDROID__
++    if (android_serial_is_path(p->pathname))
++    {
++        return android_serial_close(p);
++    }
++#endif
++
+     /*
+      * For microHam devices, do not close the
+      * socket via close but call a service routine
+@@ -1107,6 +1132,13 @@ int HAMLIB_API ser_set_rts(hamlib_port_t *p, int state)
+         return (RIG_OK);
+     }
+ 
++#ifdef __ANDROID__
++    if (android_serial_is_path(p->pathname))
++    {
++        return android_serial_set_rts(p, state);
++    }
++#endif
++
+ #if defined(TIOCMBIS) && defined(TIOCMBIC)
+     rc = IOCTL(p->fd, state ? TIOCMBIS : TIOCMBIC, &y);
+ #else
+@@ -1190,6 +1222,13 @@ int HAMLIB_API ser_set_dtr(hamlib_port_t *p, int state)
+         return (RIG_OK);
+     }
+ 
++#ifdef __ANDROID__
++    if (android_serial_is_path(p->pathname))
++    {
++        return android_serial_set_dtr(p, state);
++    }
++#endif
++
+ #if defined(TIOCMBIS) && defined(TIOCMBIC)
+     rc = IOCTL(p->fd, state ? TIOCMBIS : TIOCMBIC, &y);
+ #else

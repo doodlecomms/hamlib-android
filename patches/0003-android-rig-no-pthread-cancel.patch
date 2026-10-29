@@ -1,0 +1,24 @@
+diff --git a/src/rig.c b/src/rig.c
+index 5df69304..db3def96 100644
+--- a/src/rig.c
++++ b/src/rig.c
+@@ -8566,7 +8566,9 @@ static int async_data_handler_stop(RIG *rig)
+         {
+             // all cleanup is done in this function so we can kill thread
+             // Windows was taking 30 seconds to stop without this
++#ifndef __ANDROID__
+             pthread_cancel(async_data_handler_priv->thread_id);
++#endif
+             int err = pthread_join(async_data_handler_priv->thread_id, NULL);
+ 
+             if (err)
+@@ -8621,7 +8623,9 @@ static int morse_data_handler_stop(RIG *rig)
+         {
+             // all cleanup is done in this function so we can kill thread
+             // Windows was taking 30 seconds to stop without this
++#ifndef __ANDROID__
+             pthread_cancel(morse_data_handler_priv->thread_id);
++#endif
+             int err = pthread_join(morse_data_handler_priv->thread_id, NULL);
+ 
+             if (err)

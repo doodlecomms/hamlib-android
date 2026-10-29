@@ -1,0 +1,22 @@
+diff --git a/src/rot_reg.c b/src/rot_reg.c
+index 3c1066602..6f32e3539 100644
+--- a/src/rot_reg.c
++++ b/src/rot_reg.c
+@@ -84,7 +84,7 @@ DEFINE_INITROT_BACKEND(radant);
+ #if HAVE_LIBINDI
+ DEFINE_INITROT_BACKEND(indi);
+ #endif
+-#if defined(ANDROID) || defined(__ANDROID__)
++#if defined(HAMLIB_WITH_ANDROIDSENSOR) /* built only by the legacy Android.mk */
+ DEFINE_INITROT_BACKEND(androidsensor);
+ #endif
+ DEFINE_INITROT_BACKEND(grbltrk);
+@@ -137,7 +137,7 @@ static struct
+ #if HAVE_LIBINDI
+     { ROT_INDI, ROT_BACKEND_INDI, ROT_FUNCNAMA(indi) },
+ #endif
+-#if defined(ANDROID) || defined(__ANDROID__)
++#if defined(HAMLIB_WITH_ANDROIDSENSOR) /* built only by the legacy Android.mk */
+     { ROT_ANDROIDSENSOR, ROT_BACKEND_ANDROIDSENSOR, ROT_FUNCNAMA(androidsensor) },
+ #endif
+     { ROT_GRBLTRK, ROT_BACKEND_GRBLTRK, ROT_FUNCNAMA(grbltrk) },

@@ -1,0 +1,16 @@
+diff --git a/rotators/ars/ars.c b/rotators/ars/ars.c
+index 2b51609a..3c2e5bdf 100644
+--- a/rotators/ars/ars.c
++++ b/rotators/ars/ars.c
+@@ -216,7 +216,11 @@ ars_close(ROT *rot)
+ {
+     struct ars_priv_data *priv = (struct ars_priv_data *)ROTSTATE(rot)->priv;
+ 
++#if defined(__ANDROID__)
++    (void)priv;
++#else
+     pthread_cancel(priv->thread);
++#endif
+ 
+     /* leave it in safe state */
+     ars_stop(rot);
