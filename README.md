@@ -29,8 +29,7 @@ master on 2025-12-02, 143 commits before this revision.
 | `0005-android-rot-reg-no-androidsensor.patch` | The "androidsensor" rotator is only built by Hamlib's legacy `Android.mk`; with autotools its registration left `initrots5_androidsensor` undefined, so `libhamlib.so` would not load. |
 
 The serial hook in 0001, and patches 0002 to 0004, are based on the
-Android USB serial bridge from JS8Android, used under the LGPL with its
-author's permission. The bridge itself (`src/android_serial_bridge.c`) was
+Android USB serial bridge from JS8Android, used under the LGPL . The bridge itself (`src/android_serial_bridge.c`) was
 rewritten: it takes the host callbacks through a registered table so
 `libhamlib.so` has no undefined symbols, drops the Bluetooth transport,
 and serializes open/close so an unplugged device cannot crash the app.
