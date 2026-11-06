@@ -27,6 +27,9 @@ OUT_DIR="${SCRIPT_DIR}/out"
 if [[ -z "${JNILIBS_DIR:-}" ]]; then
   if [[ -d "${SCRIPT_DIR}/../android/app/src/main" ]]; then
     JNILIBS_DIR="${SCRIPT_DIR}/../android/app/src/main/jniLibs"
+  elif [[ -d "${SCRIPT_DIR}/../app/src/main" ]]; then
+    # Rattlegram Plus Plus layout
+    JNILIBS_DIR="${SCRIPT_DIR}/../app/src/main/jniLibs"
   else
     JNILIBS_DIR="${SCRIPT_DIR}/jniLibs"
   fi

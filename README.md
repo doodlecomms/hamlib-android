@@ -1,11 +1,19 @@
-# Hamlib for Android (Repeaters for Dummies)
+# Hamlib for Android
 
-Repeaters for Dummies uses a patched build of
-[Hamlib](https://github.com/Hamlib/Hamlib), shipped as its own shared
-library (`libhamlib.so`) inside the Android app. This folder contains
-everything needed to rebuild that library and replace it in the app, as
-required by the GNU Lesser General Public License, version 2.1 or later
-([COPYING.LIB](COPYING.LIB)).
+A patched build of [Hamlib](https://github.com/Hamlib/Hamlib) for Android
+apps, shipped as its own shared library (`libhamlib.so`) inside each app.
+This repository contains everything needed to rebuild that library and
+replace it in the apps, as required by the GNU Lesser General Public
+License, version 2.1 or later ([COPYING.LIB](COPYING.LIB)).
+
+## Used by
+
+| App | What it uses Hamlib for | Built with |
+|---|---|---|
+| [Rattlegram Plus Plus](https://github.com/doodlecomms/Rattlegram_Plus_Plus) | Optional rig control (Menu → Rig Control (Hamlib)): reads and sets the radio's frequency and keys it (CAT PTT) over a USB serial cable. A copy of this folder is in the app's [`hamlib/`](https://github.com/doodlecomms/Rattlegram_Plus_Plus/tree/main/hamlib). | `ANDROID_API=24` |
+| Repeaters for Dummies (not yet released) | Rig control over a USB serial cable. | `ANDROID_API=26` (default) |
+
+Both apps use the same base revision and the same patches.
 
 The patches and the build script in this folder are released under the
 same license as Hamlib, LGPL-2.1-or-later.
@@ -29,7 +37,7 @@ master on 2025-12-02, 143 commits before this revision.
 | `0005-android-rot-reg-no-androidsensor.patch` | The "androidsensor" rotator is only built by Hamlib's legacy `Android.mk`; with autotools its registration left `initrots5_androidsensor` undefined, so `libhamlib.so` would not load. |
 
 The serial hook in 0001, and patches 0002 to 0004, are based on the
-Android USB serial bridge from JS8Android, used under the LGPL . The bridge itself (`src/android_serial_bridge.c`) was
+Android USB serial bridge from JS8Android, used under the LGPL. The bridge itself (`src/android_serial_bridge.c`) was
 rewritten: it takes the host callbacks through a registered table so
 `libhamlib.so` has no undefined symbols, drops the Bluetooth transport,
 and serializes open/close so an unplugged device cannot crash the app.
@@ -48,15 +56,18 @@ ABIS=arm64-v8a ./build-hamlib-android.sh  # one ABI
 
 The script clones Hamlib into `.work/`, checks out the pinned revision,
 applies `patches/*.patch`, configures with `--enable-shared
---disable-static --without-libusb` for API 26, and writes `libhamlib.so`
-(SONAME `libhamlib.so`) to `jniLibs/<abi>/` (inside the app's source tree it
-goes straight into the app's `android/app/src/main/jniLibs/<abi>/`; set
-`JNILIBS_DIR` to put it anywhere else). It stops if the library has any
-unresolved symbols or depends on libusb.
+--disable-static --without-libusb` for `ANDROID_API` (default 26; use
+`ANDROID_API=24` for Rattlegram Plus Plus, which supports Android 7.0), and
+writes `libhamlib.so` (SONAME `libhamlib.so`) to `jniLibs/<abi>/`. When this
+folder sits inside an app's source tree, it goes straight into the app's
+jniLibs: `android/app/src/main/jniLibs/<abi>/` (Repeaters for Dummies) or
+`app/src/main/jniLibs/<abi>/` (Rattlegram Plus Plus). Set `JNILIBS_DIR` to
+put it anywhere else. It stops if the library has any unresolved symbols or
+depends on libusb.
 
-## Replacing the library in the app
+## Replacing the library in an app
 
-The app loads `libhamlib.so` with `System.loadLibrary("hamlib")` and calls
+Each app loads `libhamlib.so` with `System.loadLibrary("hamlib")` and calls
 only Hamlib's public C API plus `rpt_usb_serial_register()`. To use your
 own build, replace `lib/<abi>/libhamlib.so` inside the APK with a library
 built from these patches (or your own modified version that keeps that
